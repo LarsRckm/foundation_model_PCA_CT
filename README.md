@@ -20,11 +20,17 @@ Dimensionsreduktion – inklusive einer interaktiven 3D-Darstellung.
 | `cluster_ct_scans.py` | Vergleich/Clustering (UMAP + PCA) real vs. synthetisch. |
 | `robust_regions.py` | Robuste per-Winkel-Regionserkennung (Mandrel / Layer / Tab / Gehäuse) auf dem entrollten Polarbild. |
 
-## Ausgaben (im Repo enthalten)
+## Ausgaben
+
+Die Analyse-Skripte erzeugen ihre Ergebnisse lokal; diese sind **nicht** im Repo
+versioniert (siehe `.gitignore`):
 
 - `polar_pca_interactive_3d.html` – interaktive 3D-Darstellung (PC1/PC2/PC3, Hover zeigt den markierten Patch)
-- `polar_pca_interactive_3d_2d.png`, `polar_pca_cumulative_violin.png`, `real.png`
+- `polar_pca_interactive_3d_2d.png`, `polar_pca_cumulative_violin.png` – Plots
 - `polar_pca_variance.xlsx` – Varianz je Hauptkomponente
+
+Auch die Eingabebilder (z. B. `real.png`) werden nicht versioniert und müssen
+beim Ausführen selbst angegeben werden.
 
 ## Installation
 

@@ -29,3 +29,8 @@ desktop.ini
 *.pt
 *.pth
 .cache/
+
+# Bild-, Ergebnis- und Ausgabedateien (nicht versioniert)
+*.png
+*.html
+*.xlsx
