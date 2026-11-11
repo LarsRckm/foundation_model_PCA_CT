@@ -42,6 +42,13 @@ COLOR_SYNTH = "#5e3c99"
 PATCH_SIZE = 14
 
 
+def _ensure_dir(path):
+    """Create the parent directory of ``path`` if needed (results folders)."""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+
+
 def load_image(image_path):
     return Image.open(image_path).convert("RGB")
 
@@ -94,7 +101,8 @@ def _overlay_pc_heatmap(ax, proc_img, score_map, vmax, title):
 
 
 def draw_split_violin(ax, x_center, y_center, real_s, synth_s,
-                      half_height, half_width):
+                      half_height, half_width,
+                      color_real=COLOR_REAL, color_synth=COLOR_SYNTH):
     """
     Draw a split violin centered at (x_center, y_center).
     The score axis is vertical (mapped into +-half_height around y_center);
@@ -117,9 +125,9 @@ def draw_split_violin(ax, x_center, y_center, real_s, synth_s,
     halfrange = 0.5 * (hi - lo)
     y = y_center + half_height * (grid - vcenter) / halfrange
 
-    ax.fill_betweenx(y, x_center - wr, x_center, color=COLOR_REAL,
+    ax.fill_betweenx(y, x_center - wr, x_center, color=color_real,
                      alpha=0.85, lw=0.4, edgecolor="white")
-    ax.fill_betweenx(y, x_center, x_center + ws, color=COLOR_SYNTH,
+    ax.fill_betweenx(y, x_center, x_center + ws, color=color_synth,
                      alpha=0.85, lw=0.4, edgecolor="white")
 
 
@@ -183,6 +191,7 @@ def save_pc_heatmaps(pcs, scores, n_real, grids, proc_imgs, evr, path):
         _overlay_pc_heatmap(ax_s, proc_imgs[1], synth_map, vmax, "Synthetic")
         fig.colorbar(im, ax=[ax_r, ax_s], fraction=0.05, pad=0.02)
     fig.suptitle("Per-PC patch-score heatmaps (variant B)")
+    _ensure_dir(path)
     fig.savefig(path, dpi=200)
     plt.close(fig)
     print(f"Saved per-PC heatmaps to {path}")
@@ -229,10 +238,15 @@ def make_overall_detail_window(real_s, synth_s, k, total_var):
 
 
 def run_violin(patches_real, gh_r, gw_r, proc_real,
-               patches_synth, gh_s, gw_s, proc_synth, args):
+               patches_synth, gh_s, gw_s, proc_synth, args,
+               output=None, show=True, heatmap_out=None):
     """PCA + cumulative-variance violin figure from precomputed patch embeddings.
     Model-agnostic: used by the CLI below (dinov2-small) and by polar_pca_eval.py
-    (any chosen foundation model, on polar-transformed images)."""
+    (any chosen foundation model, on polar-transformed images).
+
+    output : output PNG path (defaults to args.output).
+    show   : True (single run) opens the interactive click window; False
+             (multi-model batch) only saves the static PNG and closes the figure."""
     X = np.vstack((patches_real, patches_synth))
     labels = np.concatenate([np.zeros(patches_real.shape[0]), np.ones(patches_synth.shape[0])])
     real_mask = labels == 0
@@ -326,14 +340,22 @@ def run_violin(patches_real, gh_r, gw_r, proc_real,
     ax.legend(handles=legend_handles, loc="lower right", fontsize=9)
 
     fig.tight_layout()
-    fig.savefig(args.output, dpi=200)
-    print(f"Saved static figure to {args.output}")
+    out = output or args.output
+    _ensure_dir(out)
+    fig.savefig(out, dpi=200)
+    print(f"Saved static figure to {out}")
 
     # ---- variant B: optional static export of per-PC heatmaps ----------- #
     if args.heatmap_pcs:
         pcs = [p for p in parse_pc_list(args.heatmap_pcs) if 0 <= p < len(evr)]
         if pcs:
-            save_pc_heatmaps(pcs, scores, n_real, grids, proc_imgs, evr, args.heatmap_out)
+            save_pc_heatmaps(pcs, scores, n_real, grids, proc_imgs, evr,
+                             heatmap_out or args.heatmap_out)
+
+    # In multi-model batch mode we only save the static PNG (no blocking window).
+    if not show:
+        plt.close(fig)
+        return
 
     # ---- click handler: open a PC in a separate window ------------------ #
     def on_click(event):
@@ -360,6 +382,141 @@ def run_violin(patches_real, gh_r, gw_r, proc_real,
         print("\nMain window is open. Click any violin to open that PC's distribution "
               "and patch heatmap in a new window. Close the window to exit.")
     plt.show()
+
+
+def _with_suffix(name, suffix):
+    """'bar.png' + 'dinov2-large' -> 'bar_dinov2-large.png'."""
+    base, ext = os.path.splitext(name)
+    return f"{base}_{suffix}{ext}"
+
+
+def _lighten(hex_color, amount=0.55):
+    """Blend a hex color toward white (amount in [0,1]) -> synth = lighter tone."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    r = int(r + (255 - r) * amount)
+    g = int(g + (255 - g) * amount)
+    b = int(b + (255 - b) * amount)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+# Distinct base hues per model; real = base (dark tone), synth = lightened tone.
+MODEL_PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",
+                 "#ff7f0e", "#8c564b", "#17becf", "#bcbd22"]
+
+
+def _fit_model_scores(patches_real, patches_synth, args):
+    """PCA on the REAL embeddings, project both; return (scores, evr, cum, k, n_real)."""
+    X = np.vstack((patches_real, patches_synth))
+    pca = PCA(svd_solver="full", random_state=42).fit(patches_real)
+    scores = pca.transform(X)
+    evr = pca.explained_variance_ratio_
+    cum = np.cumsum(evr)
+    k = int(np.searchsorted(cum, args.var_threshold) + 1)
+    k = min(k, len(cum))
+    if args.max_pcs:
+        k = min(k, args.max_pcs)
+    k = max(k, 3)
+    return scores, evr, cum, k, patches_real.shape[0]
+
+
+def run_violin_combined(per_model, args, output):
+    """ONE figure overlaying ALL models: the same cumulative-variance split-violin
+    layout as run_violin, but WITHOUT the 'All PCs (z)' pooled violin. Each model
+    gets its own hue (real = dark tone on the left, synth = light tone on the
+    right) and its PCs are connected by that model's cumulative-variance curve, so
+    the real-vs-synthetic comparison is kept, just per foundation model."""
+    results = []
+    for md in per_model:
+        scores, evr, cum, k, n_real = _fit_model_scores(md["pr"], md["ps"], args)
+        results.append({"name": md["name"], "scores": scores, "evr": evr,
+                        "cum": cum, "k": k, "n_real": n_real})
+    max_k = max(r["k"] for r in results)
+    M = len(results)
+
+    fig_w = max(12, max_k * 0.5)
+    fig, ax = plt.subplots(figsize=(fig_w, 7.5))
+    fig.canvas.manager.set_window_title("PCA cumulative-variance violins - all models")
+
+    # Horizontal dodge so models' violins at the same PC do not sit on top of each other.
+    offsets = np.linspace(-0.3, 0.3, M) if M > 1 else np.array([0.0])
+    half_width = min(0.4, 0.8 / M)
+    half_height = args.violin_height
+
+    legend_handles = []
+    for mi, r in enumerate(results):
+        base = MODEL_PALETTE[mi % len(MODEL_PALETTE)]
+        c_real, c_synth = base, _lighten(base, 0.55)
+        cum_pct = r["cum"][:r["k"]] * 100
+        xs = np.arange(1, r["k"] + 1) + offsets[mi]
+        real_mask = np.zeros(r["scores"].shape[0], bool)
+        real_mask[:r["n_real"]] = True
+
+        ax.plot(xs, cum_pct, color=base, lw=1.3, alpha=0.9, zorder=2)
+        ax.scatter(xs, cum_pct, s=10, color=base, alpha=0.9, zorder=3)
+        for pc in range(r["k"]):
+            draw_split_violin(ax, xs[pc], cum_pct[pc],
+                              r["scores"][real_mask, pc], r["scores"][~real_mask, pc],
+                              half_height, half_width,
+                              color_real=c_real, color_synth=c_synth)
+        legend_handles.append(Patch(facecolor=base, label=r["name"]))
+
+    ax.axhline(args.var_threshold * 100, color="gray", ls="--", lw=1)
+    ax.text(0.6, args.var_threshold * 100 + 0.2,
+            f"{args.var_threshold*100:.0f}% cumulative", fontsize=8, color="gray")
+
+    ax.set_xlim(0.3, max_k + 1)
+    ax.set_xticks(list(range(1, max_k + 1)))
+    ax.set_xticklabels([f"PC{i}" for i in range(1, max_k + 1)],
+                       rotation=90, fontsize=max(5, min(9, int(400 / max_k))))
+    ax.set_xlabel("Principal component")
+    ax.set_ylabel("Cumulative explained variance (%)")
+    ax.set_title("PC-score distributions along the cumulative-variance curve - all models\n"
+                 "(per model: dark/left half = real, light/right half = synthetic; "
+                 "PCA basis = real only, synthetic projected)", fontsize=11)
+
+    legend_handles.append(Line2D([0], [0], color="#888888", lw=0,
+                                 marker="s", markerfacecolor="#888888",
+                                 label="dark = real / light = synth"))
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=9, title="Modell")
+
+    fig.tight_layout()
+    _ensure_dir(output)
+    fig.savefig(output, dpi=200)
+    plt.close(fig)
+    print(f"Saved combined all-models figure to {output}")
+
+
+def run_violin_multi(per_model, args):
+    """Cumulative-variance violin analysis for ONE OR MORE foundation models.
+
+    per_model : list of dicts with keys name, pr, ghr, gwr, disp_r, ps, ghs, gws,
+        disp_s. A single model reproduces the original interactive figure; with
+        several, each model gets its own static PNG (..._<name>.png) plus ONE
+        combined figure (..._all_models.png) overlaying all of them."""
+    image_dir = getattr(args, "image_dir", None) or os.path.dirname(args.output) or "."
+    base = os.path.basename(args.output)
+    hbase = os.path.basename(args.heatmap_out)
+
+    if len(per_model) == 1:
+        md = per_model[0]
+        run_violin(md["pr"], md["ghr"], md["gwr"], md["disp_r"],
+                   md["ps"], md["ghs"], md["gws"], md["disp_s"], args,
+                   output=os.path.join(image_dir, base), show=True,
+                   heatmap_out=os.path.join(image_dir, hbase))
+        return
+
+    for md in per_model:
+        out = os.path.join(image_dir, _with_suffix(base, md["name"]))
+        print(f"\n[{md['name']}] cumulative-variance violin -> {out}")
+        run_violin(md["pr"], md["ghr"], md["gwr"], md["disp_r"],
+                   md["ps"], md["ghs"], md["gws"], md["disp_s"], args,
+                   output=out, show=False,
+                   heatmap_out=os.path.join(image_dir, _with_suffix(hbase, md["name"])))
+
+    combined = os.path.join(image_dir, _with_suffix(base, "all_models"))
+    print("\n[all models] combined comparison figure ...")
+    run_violin_combined(per_model, args, combined)
 
 
 def main(args):

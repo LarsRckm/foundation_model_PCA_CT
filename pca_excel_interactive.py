@@ -38,6 +38,25 @@ COLOR_REAL = "#2c7fb8"
 COLOR_SYNTH = "#d95f0e"
 
 
+def _ensure_dir(path):
+    """Create the parent directory of ``path`` if needed (results folders)."""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+
+
+# Region coloring for the static 2D PNG, identical to the HTML "Regionen" mode:
+# code -> (real tone = dark, synth tone = light).
+REGION_COLORS = {
+    0: ("#777777", "#cfcfcf"),   # Padding
+    1: ("#1b7a37", "#8ede93"),   # Mandrel
+    2: ("#5e3370", "#c7a6d8"),   # Layer
+    3: ("#a11117", "#f2898e"),   # Zellgehaeuse
+    4: ("#b5680f", "#f0b35a"),   # Tab
+}
+REGION_NAMES = {0: "Padding", 1: "Mandrel", 2: "Layer", 3: "Zellgehaeuse", 4: "Tab"}
+
+
 def load_image(image_path):
     return Image.open(image_path).convert("RGB")
 
@@ -97,6 +116,7 @@ def _sanitize_sheet_name(name):
 
 def write_excel(sheets, path):
     """sheets: list of (sheet_name, fitted PCA). One sheet per image."""
+    _ensure_dir(path)
     try:
         import pandas as pd
         with pd.ExcelWriter(path, engine="openpyxl") as writer:
@@ -132,7 +152,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>DINOv2 PCA - interactive 3D</title>
+<title>__MODEL__ PCA - interactive 3D</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; }
@@ -160,7 +180,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h2>DINOv2 patch embeddings - PCA (2D PC1/PC2 oder 3D PC1/PC2/PC3)</h2>
+<h2>__MODEL__ patch embeddings - PCA (2D PC1/PC2 oder 3D PC1/PC2/PC3)</h2>
 <p class="hint">Axes = PCA basis of the REAL embeddings (PC1/PC2/PC3); synthetic points are
    projected onto it &middot; color = real vs. synthetic &middot;
    "Patches (horizontal)" thins points along the angle axis (every 2nd/3rd/4th column)
@@ -358,7 +378,7 @@ drawBounds();
 
 
 def build_interactive_html(scores, labels, grids, img_b64, evr, path,
-                           regions=None, bounds=None):
+                           regions=None, bounds=None, model_name=None):
     """scores: (N, >=3), only PC1..PC3 used; labels: 0/1; grids: (grid_h, grid_w) per image.
 
     regions : optional [regions_real, regions_synth], each an int array (row-major,
@@ -428,31 +448,133 @@ def build_interactive_html(scores, labels, grids, img_b64, evr, path,
             .replace("__LAYOUT__", json.dumps(layout))
             .replace("__IMAGES__", json.dumps(images))
             .replace("__REGION_FLAG__", json.dumps(region_flag))
-            .replace("__BOUNDS__", json.dumps(bound_data)))
+            .replace("__BOUNDS__", json.dumps(bound_data))
+            .replace("__MODEL__", model_name or "DINOv2"))
+    _ensure_dir(path)
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"  saved {path}")
 
 
-def save_2d_png(scores, labels, evr, path):
-    """Static PNG of the 2D view: PC1 vs PC2 of the REAL basis, colored real vs. synthetic."""
+def save_2d_png(scores, labels, evr, path, regions=None):
+    """Static PNG of the 2D view (PC1 vs PC2 of the REAL basis).
+
+    Without ``regions`` the points are colored real vs. synthetic. With
+    ``regions`` ([regions_real, regions_synth], same row-major patch order as the
+    scores) the points are colored by region exactly like the interactive HTML's
+    "Regionen" mode (dark tone = real, light tone = synthetic), with a matching
+    legend."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     labels = np.asarray(labels)
+
+    reg_ok = False
+    if regions is not None:
+        try:
+            reg_all = np.concatenate([np.asarray(regions[0]).ravel(),
+                                      np.asarray(regions[1]).ravel()])
+            reg_ok = len(reg_all) == len(scores)
+        except Exception:
+            reg_ok = False
+
     fig, ax = plt.subplots(figsize=(7, 6))
-    for grp, name, color in [(0, "Real", COLOR_REAL), (1, "Synthetic", COLOR_SYNTH)]:
-        m = labels == grp
-        ax.scatter(scores[m, 0], scores[m, 1], s=6, alpha=0.6, c=color,
-                   label=name, edgecolors="none")
+
+    if reg_ok:
+        tones = labels.astype(int)                       # 0 = real (dark), 1 = synth (light)
+        point_colors = [REGION_COLORS.get(int(reg_all[i]), REGION_COLORS[0])[tones[i]]
+                        for i in range(len(scores))]
+        ax.scatter(scores[:, 0], scores[:, 1], s=8, c=point_colors,
+                   alpha=0.7, edgecolors="none")
+        present = sorted({int(c) for c in reg_all})
+        handles = [Line2D([0], [0], marker="o", ls="", markersize=7,
+                          markerfacecolor=REGION_COLORS.get(c, REGION_COLORS[0])[0],
+                          markeredgecolor="none", label=REGION_NAMES.get(c, str(c)))
+                   for c in present]
+        handles.append(Line2D([0], [0], marker="o", ls="", markersize=7,
+                              markerfacecolor="#888888", markeredgecolor="none",
+                              label="dunkler Ton = real / heller Ton = synth"))
+        ax.legend(handles=handles, loc="best", fontsize=8, title="Region")
+        ax.set_title("PCA (PC1/PC2, reale Basis) - nach Regionen eingefaerbt")
+    else:
+        for grp, name, color in [(0, "Real", COLOR_REAL), (1, "Synthetic", COLOR_SYNTH)]:
+            m = labels == grp
+            ax.scatter(scores[m, 0], scores[m, 1], s=6, alpha=0.6, c=color,
+                       label=name, edgecolors="none")
+        ax.legend(markerscale=2, loc="best")
+        ax.set_title("PCA (PC1/PC2) - reale Basis")
+
     ax.set_xlabel(f"PC1 ({evr[0]*100:.1f}%)")
     ax.set_ylabel(f"PC2 ({evr[1]*100:.1f}%)")
-    ax.set_title("DINOv2 PCA (PC1/PC2) - real basis")
-    ax.legend(markerscale=2, loc="best")
     fig.tight_layout()
+    _ensure_dir(path)
     fig.savefig(path, dpi=200)
     plt.close(fig)
     print(f"  saved {path}")
+
+
+def _with_suffix(name, suffix):
+    """'bar.html' + 'dinov2-large' -> 'bar_dinov2-large.html'."""
+    base, ext = os.path.splitext(name)
+    return f"{base}_{suffix}{ext}"
+
+
+def run_excel_multi(per_model, args):
+    """Excel + interactive-3D analysis for ONE OR MORE foundation models.
+
+    per_model : list of dicts, one per model, each with keys
+        name, pr, ghr, gwr, disp_r, ps, ghs, gws, disp_s, regions, bounds
+        (pr/ps = patch embeddings [N, D]; disp_* = processed PIL images;
+         regions/bounds = optional per-image region overlay, or None).
+
+    Writes one interactive HTML (+ 2D PNG) PER MODEL and a single Excel workbook
+    with two sheets per model ('<name>_real', '<name>_synth'). Outputs are routed
+    into args.html_dir / args.excel_dir / args.image_dir, which are created
+    automatically. With a single model the HTML keeps its base file name."""
+    single = len(per_model) == 1
+    html_dir = getattr(args, "html_dir", None) or "."
+    excel_dir = getattr(args, "excel_dir", None) or "."
+    image_dir = getattr(args, "image_dir", None) or "."
+    html_base = os.path.basename(args.html_out)
+    excel_path = os.path.join(excel_dir, os.path.basename(args.excel_out))
+
+    sheets = []
+    for md in per_model:
+        name = md["name"]
+        pr, ps = md["pr"], md["ps"]
+        print(f"\n[{name}] fitting per-image PCA "
+              f"(real {pr.shape[0]}x{pr.shape[1]}, synth {ps.shape[0]}x{ps.shape[1]})...")
+        pca_real = PCA(svd_solver="full", random_state=42).fit(pr)
+        pca_synth = PCA(svd_solver="full", random_state=42).fit(ps)
+        sheets.append((f"{name}_real", pca_real))
+        sheets.append((f"{name}_synth", pca_synth))
+
+        if pca_real.components_.shape[0] < 3:
+            print(f"[{name}] real embeddings yield < 3 components; skipping HTML.")
+            continue
+
+        html_name = html_base if single else _with_suffix(html_base, name)
+        html_out = os.path.join(html_dir, html_name)
+        png_out = os.path.join(image_dir, os.path.splitext(html_name)[0] + "_2d.png")
+
+        X = np.vstack((pr, ps))
+        labels = np.concatenate([np.zeros(pr.shape[0]), np.ones(ps.shape[0])])
+        scores = pca_real.transform(X)[:, :3]
+        evr = pca_real.explained_variance_ratio_[:3]
+        img_b64 = [pil_to_base64(md["disp_r"]), pil_to_base64(md["disp_s"])]
+        print(f"[{name}] interactive HTML -> {html_out}")
+        build_interactive_html(scores, labels,
+                               [(md["ghr"], md["gwr"]), (md["ghs"], md["gws"])],
+                               img_b64, evr, html_out,
+                               regions=md.get("regions"), bounds=md.get("bounds"),
+                               model_name=name)
+        save_2d_png(scores, labels, evr, png_out, regions=md.get("regions"))
+
+    print(f"\nWriting Excel ({len(per_model)} model(s), {len(sheets)} sheets) "
+          f"-> {excel_path}")
+    write_excel(sheets, excel_path)
+    print("Done (Excel + interactive 3D).")
 
 
 def main(args):

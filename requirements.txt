@@ -10,3 +10,4 @@ scipy
 plotly
 pandas
 openpyxl
+huggingface_hub

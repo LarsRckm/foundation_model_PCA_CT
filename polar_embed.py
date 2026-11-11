@@ -110,13 +110,28 @@ def to_polar_display(path, fmt, n_r, n_theta, H, W, patch, fns, pad_thresh=5):
 # --------------------------------------------------------------------------- #
 # Model loading + patch-embedding extraction
 # --------------------------------------------------------------------------- #
-def load_model(model_name, device=None):
-    """Return (model, processor, patch_size, device) for a registry name."""
+def load_model(model_name, device=None, token=None):
+    """Return (model, processor, patch_size, device) for a registry name.
+
+    ``token`` is an optional Hugging Face access token for GATED models
+    (e.g. ``dinov3-large``). When it is None, transformers still falls back to the
+    ``HF_TOKEN`` environment variable or a cached ``huggingface-cli login``, so the
+    token only needs to be passed explicitly (via ``--hf_token``) when neither of
+    those is set up."""
     from transformers import AutoImageProcessor, AutoModel
     hf_id, patch = MODELS[model_name]
-    proc = AutoImageProcessor.from_pretrained(hf_id)
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    model = AutoModel.from_pretrained(hf_id).to(device).eval()
+    auth = {"token": token} if token else {}
+    try:
+        proc = AutoImageProcessor.from_pretrained(hf_id, **auth)
+        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        model = AutoModel.from_pretrained(hf_id, **auth).to(device).eval()
+    except Exception as exc:                       # gated repo / missing access / old transformers
+        raise RuntimeError(
+            f"Could not load model '{model_name}' ({hf_id}): {exc}\n"
+            "If this is a gated model (e.g. dinov3-large): request access to the repo "
+            "on huggingface.co, then provide a token via --hf_token, the HF_TOKEN "
+            "environment variable, or `huggingface-cli login`. Also make sure your "
+            "installed `transformers` is recent enough to support the model.") from exc
     return model, proc, patch, device
 
 
