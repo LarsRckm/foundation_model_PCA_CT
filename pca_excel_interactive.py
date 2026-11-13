@@ -205,6 +205,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <polyline id="bMand" fill="none" stroke="#ffeb3b" stroke-width="2"
                   vector-effect="non-scaling-stroke"/>
       </svg>
+      <div id="vstrip" style="position:absolute;left:0;top:0;width:12px;height:100%;display:none;pointer-events:none;background:linear-gradient(to bottom,#fde725,#7ad151,#22a884,#2a788e,#414487,#440154)"></div>
     </div>
     <div class="sliderRow" id="regionRow">
       <label><input type="checkbox" id="showRegions">
@@ -220,6 +221,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <span><u style="border-top:3px solid #ffeb3b"></u>Mandrel&rarr;Layer</span>
         <span><u style="border-top:3px solid #00e5ff"></u>Layer&rarr;Geh&auml;use</span>
       </div>
+    </div>
+    <div class="sliderRow" id="verticalRow">
+      <label style="width:auto;cursor:pointer"><input type="checkbox" id="showVertical">
+        Nach vertikaler Position einf&auml;rben</label>
+      <div class="hint" style="margin-top:3px">Farbe = H&ouml;he im Polarbild (oben&rarr;unten) &middot; Form: Kreis = real, Raute = synthetisch</div>
     </div>
     <div class="sliderRow">
       <label>Patches (horizontal):</label>
@@ -290,9 +296,10 @@ function drawBounds(){
 function buildTraces(){
   var stride = parseInt(document.getElementById('colStride').value, 10) || 1;
   var byRegion = regionsActive();
+  var byVert = verticalActive();
   var out = [], shown = 0;
   for (var i = 0; i < full.length; i++){
-    var f = full[i], xs=[], ys=[], zs=[], ss=[], cds=[], cols=[];
+    var f = full[i], xs=[], ys=[], zs=[], ss=[], cds=[], cols=[], vps=[];
     for (var k = 0; k < f.x.length; k++){
       // col = patch column = angle axis (horizontal); stride thins it (every Nth column).
       if (f.cd[k][6] % stride === 0){
@@ -300,20 +307,29 @@ function buildTraces(){
         ss.push(f.size[k]); cds.push(f.cd[k]);
         // region hue + dark(echt)/light(synth) tone via cd[0] (0=real, 1=synth).
         if (byRegion) cols.push(REGION_COLORS[f.cd[k][7]][f.cd[k][0]]);
+        else if (byVert) vps.push(f.cd[k][8]);   // vertical position 0..1 (cd[8])
       }
     }
     shown += xs.length;
-    var color = byRegion ? cols : f.baseColor;
-    if (mode === '3d'){
-      out.push({ type:'scatter3d', mode:'markers', name:names[i],
-                 x:xs, y:ys, z:zs, customdata:cds,
-                 marker:{ size:ss, color:color, opacity:0.75 }, hovertemplate:HT3 });
+    var is3d = (mode === '3d');
+    var sizes = is3d ? ss : ss.map(function(s){ return s*1.7; });
+    var marker;
+    if (byVert){
+      // colored by vertical position; one shared colorbar (on the real trace),
+      // real = circle, synth = diamond so the two groups stay distinguishable.
+      marker = { size:sizes, symbol:(i===0 ? 'circle' : 'diamond'),
+                 color:vps, colorscale:'Viridis', cmin:0, cmax:1, opacity:0.8,
+                 showscale:(i===0),
+                 colorbar:{ title:{text:'vertikale Position'}, tickmode:'array',
+                            tickvals:[0,0.5,1], ticktext:['unten','Mitte','oben'],
+                            thickness:12, len:0.9, x:1.02 } };
     } else {
-      out.push({ type:'scattergl', mode:'markers', name:names[i],
-                 x:xs, y:ys, customdata:cds,
-                 marker:{ size:ss.map(function(s){ return s*1.7; }), color:color, opacity:0.75 },
-                 hovertemplate:HT2 });
+      marker = { size:sizes, color:(byRegion ? cols : f.baseColor), opacity:0.75 };
     }
+    var tr = { mode:'markers', name:names[i], customdata:cds, marker:marker,
+               x:xs, y:ys, hovertemplate:(is3d ? HT3 : HT2) };
+    if (is3d){ tr.type='scatter3d'; tr.z=zs; } else { tr.type='scattergl'; }
+    out.push(tr);
   }
   document.getElementById('count').innerText = shown + ' points shown (stride ' + stride + ')';
   return out;
@@ -347,10 +363,16 @@ gd.on('plotly_hover', function(ev){
   drawBounds();
 });
 
-function applyRegionMode(){
+function verticalActive(){
+  var cb = document.getElementById('showVertical');
+  return cb && cb.checked;
+}
+function applyModes(){
   var leg = document.getElementById('regionLegend');
   if (leg) leg.style.display = regionsActive() ? 'block' : 'none';
-  render();   // recolor + redraw transitions (keeps the current 2D/3D view)
+  var vs = document.getElementById('vstrip');
+  if (vs) vs.style.display = verticalActive() ? 'block' : 'none';
+  render();   // recolor + redraw (keeps the current 2D/3D view)
 }
 
 document.getElementById('colStride').addEventListener('change', render);
@@ -361,8 +383,18 @@ for (var vi = 0; vi < vradios.length; vi++){
   vradios[vi].addEventListener('change', function(e){ mode = e.target.value; render(); });
 }
 
+var vcb = document.getElementById('showVertical');
+if (vcb){
+  vcb.addEventListener('change', function(){
+    if (vcb.checked){ var rc = document.getElementById('showRegions'); if (rc) rc.checked = false; }
+    applyModes();   // vertical position and regions are mutually exclusive
+  });
+}
 if (regionFlag && document.getElementById('showRegions')){
-  document.getElementById('showRegions').addEventListener('change', applyRegionMode);
+  document.getElementById('showRegions').addEventListener('change', function(){
+    if (document.getElementById('showRegions').checked && vcb) vcb.checked = false;
+    applyModes();
+  });
 } else {
   var rr = document.getElementById('regionRow');
   if (rr) rr.style.display = 'none';   // no region data (e.g. dinov2-small CLI)
@@ -395,6 +427,7 @@ def build_interactive_html(scores, labels, grids, img_b64, evr, path,
         idx = np.where(labels == grp)[0]
         gh, gw = grids[grp]
         reg = regions[grp] if regions is not None else None
+        denom = max(gh - 1, 1)
         cd = []
         for local_p, gi in enumerate(idx):
             r = local_p // gw
@@ -402,8 +435,9 @@ def build_interactive_html(scores, labels, grids, img_b64, evr, path,
             x0, x1 = c / gw, (c + 1) / gw
             y0, y1 = r / gh, (r + 1) / gh
             region_val = int(reg[local_p]) if reg is not None else 0
-            # customdata = [grp, x0, y0, x1, y1, row, col, region]
-            cd.append([grp, x0, y0, x1, y1, int(r), int(c), region_val])
+            vpos = round(1 - r / denom, 4)         # 1 = top (oben) .. 0 = bottom (unten)
+            # customdata = [grp, x0, y0, x1, y1, row, col, region, vpos]
+            cd.append([grp, x0, y0, x1, y1, int(r), int(c), region_val, vpos])
         traces.append({
             "type": "scatter3d",
             "mode": "markers",
