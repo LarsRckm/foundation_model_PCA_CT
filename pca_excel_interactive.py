@@ -227,6 +227,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         Nach vertikaler Position einf&auml;rben</label>
       <div class="hint" style="margin-top:3px">Farbe = H&ouml;he im Polarbild (oben&rarr;unten) &middot; Form: Kreis = real, Raute = synthetisch</div>
     </div>
+    <div class="sliderRow" id="combinedRow">
+      <label style="width:auto;cursor:pointer"><input type="checkbox" id="showCombined">
+        Regionen &times; Tiefe (kombiniert)</label>
+      <div class="legend" id="combinedLegend"></div>
+    </div>
+    <div class="sliderRow" id="groupRow">
+      <label>Gruppe:</label>
+      <select id="groupFilter">
+        <option value="both">beide</option>
+        <option value="real">nur real</option>
+        <option value="synth">nur synthetisch</option>
+      </select>
+    </div>
     <div class="sliderRow">
       <label>Patches (horizontal):</label>
       <select id="colStride">
@@ -263,6 +276,24 @@ var REGION_COLORS = {
 };
 var REGION_NAMES  = {0:'Padding', 1:'Mandrel', 2:'Layer', 3:'Zellgehaeuse', 4:'Tab'};
 
+// Combined "Region x Tiefe": per region a dark (unten) -> light (oben) ramp.
+var REGION_RAMP = {
+  0: ['#555555', '#d8d8d8'],   // Padding
+  1: ['#0f3d1c', '#9fe3ab'],   // Mandrel  (green)
+  2: ['#3a1f52', '#d2b8e0'],   // Layer    (purple)
+  3: ['#5c1414', '#f3a0a3'],   // Gehaeuse (red)
+  4: ['#5c3708', '#f2bd70']    // Tab      (orange)
+};
+function _hx(h){ h=h.replace('#',''); return [parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)]; }
+function lerpHex(a, b, t){
+  var A=_hx(a), B=_hx(b), f=function(i){ return Math.round(A[i]+(B[i]-A[i])*t); };
+  return 'rgb('+f(0)+','+f(1)+','+f(2)+')';
+}
+function combinedColor(region, vpos){
+  var r = REGION_RAMP[region] || REGION_RAMP[0];
+  return lerpHex(r[0], r[1], Math.max(0, Math.min(1, vpos)));   // vpos 1 = oben (light)
+}
+
 // Keep an untouched copy of every trace so filtering is reversible.
 var full = traces.map(function(t){
   return { x:t.x.slice(), y:t.y.slice(), z:t.z.slice(),
@@ -283,7 +314,7 @@ function ptsToStr(pts){
 function drawBounds(){
   var svg = document.getElementById('bounds');
   if (!svg) return;
-  var on = regionsActive() && boundData;
+  var on = (regionsActive() || combinedActive()) && boundData;
   svg.style.display = on ? 'block' : 'none';
   if (!on) return;
   var b = boundData[curImg] || {m:[], r:[]};
@@ -295,18 +326,21 @@ function drawBounds(){
 // 3D -> scatter3d (PC1/PC2/PC3); 2D -> scattergl (PC1/PC2 only).
 function buildTraces(){
   var stride = parseInt(document.getElementById('colStride').value, 10) || 1;
+  var grp = groupMode();
   var byRegion = regionsActive();
   var byVert = verticalActive();
+  var byComb = combinedActive();
   var out = [], shown = 0;
   for (var i = 0; i < full.length; i++){
+    if ((grp === 'real' && i !== 0) || (grp === 'synth' && i !== 1)) continue;   // group filter
     var f = full[i], xs=[], ys=[], zs=[], ss=[], cds=[], cols=[], vps=[];
     for (var k = 0; k < f.x.length; k++){
       // col = patch column = angle axis (horizontal); stride thins it (every Nth column).
       if (f.cd[k][6] % stride === 0){
         xs.push(f.x[k]); ys.push(f.y[k]); zs.push(f.z[k]);
         ss.push(f.size[k]); cds.push(f.cd[k]);
-        // region hue + dark(echt)/light(synth) tone via cd[0] (0=real, 1=synth).
         if (byRegion) cols.push(REGION_COLORS[f.cd[k][7]][f.cd[k][0]]);
+        else if (byComb) cols.push(combinedColor(f.cd[k][7], f.cd[k][8]));   // region hue x depth lightness
         else if (byVert) vps.push(f.cd[k][8]);   // vertical position 0..1 (cd[8])
       }
     }
@@ -315,14 +349,18 @@ function buildTraces(){
     var sizes = is3d ? ss : ss.map(function(s){ return s*1.7; });
     var marker;
     if (byVert){
-      // colored by vertical position; one shared colorbar (on the real trace),
-      // real = circle, synth = diamond so the two groups stay distinguishable.
+      // colored by vertical position; one shared colorbar (on the real trace).
       marker = { size:sizes, symbol:(i===0 ? 'circle' : 'diamond'),
                  color:vps, colorscale:'Viridis', cmin:0, cmax:1, opacity:0.8,
                  showscale:(i===0),
                  colorbar:{ title:{text:'vertikale Position'}, tickmode:'array',
                             tickvals:[0,0.5,1], ticktext:['unten','Mitte','oben'],
                             thickness:12, len:0.9, x:1.02 } };
+    } else if (byComb){
+      // bivariate: region hue x depth lightness; real = circle, synth = square + ring.
+      marker = { size:sizes, color:cols, opacity:0.85,
+                 symbol:(i===0 ? 'circle' : 'square'),
+                 line:{ color:'#111111', width:(i===0 ? 0 : 1.2) } };
     } else {
       marker = { size:sizes, color:(byRegion ? cols : f.baseColor), opacity:0.75 };
     }
@@ -367,9 +405,34 @@ function verticalActive(){
   var cb = document.getElementById('showVertical');
   return cb && cb.checked;
 }
+function combinedActive(){
+  var cb = document.getElementById('showCombined');
+  return cb && cb.checked;
+}
+function groupMode(){
+  var s = document.getElementById('groupFilter');
+  return s ? s.value : 'both';
+}
+function buildCombinedLegend(){
+  var el = document.getElementById('combinedLegend');
+  if (!el) return;
+  var order = [1,2,3,4,0];
+  var html = '<div style="margin-bottom:4px;color:#444">Farbe = Region (Farbton) &times; Tiefe (Helligkeit)</div>'
+    + '<div style="display:grid;grid-template-columns:72px 1fr;gap:3px 6px;align-items:center;max-width:240px">'
+    + '<span></span><span style="display:flex;justify-content:space-between;font-size:10px;color:#777"><span>oben</span><span>unten</span></span>';
+  for (var j=0;j<order.length;j++){
+    var code=order[j], r=REGION_RAMP[code];
+    html += '<span style="font-size:11px">'+REGION_NAMES[code]+'</span>'
+      + '<span style="height:12px;border:1px solid #ccc;background:linear-gradient(to right,'+r[1]+','+r[0]+')"></span>';
+  }
+  html += '</div><div style="margin-top:6px;font-size:11px;color:#444">&#9679; real &nbsp; &#9633; synthetisch (mit Rand)</div>';
+  el.innerHTML = html;
+}
 function applyModes(){
   var leg = document.getElementById('regionLegend');
   if (leg) leg.style.display = regionsActive() ? 'block' : 'none';
+  var cleg = document.getElementById('combinedLegend');
+  if (cleg) cleg.style.display = combinedActive() ? 'block' : 'none';
   var vs = document.getElementById('vstrip');
   if (vs) vs.style.display = verticalActive() ? 'block' : 'none';
   render();   // recolor + redraw (keeps the current 2D/3D view)
@@ -384,20 +447,23 @@ for (var vi = 0; vi < vradios.length; vi++){
 }
 
 var vcb = document.getElementById('showVertical');
-if (vcb){
-  vcb.addEventListener('change', function(){
-    if (vcb.checked){ var rc = document.getElementById('showRegions'); if (rc) rc.checked = false; }
-    applyModes();   // vertical position and regions are mutually exclusive
-  });
+var ccb = document.getElementById('showCombined');
+var rcb = document.getElementById('showRegions');
+function soloCheck(active){
+  [rcb, vcb, ccb].forEach(function(cb){ if (cb && cb !== active) cb.checked = false; });   // one color mode at a time
 }
-if (regionFlag && document.getElementById('showRegions')){
-  document.getElementById('showRegions').addEventListener('change', function(){
-    if (document.getElementById('showRegions').checked && vcb) vcb.checked = false;
-    applyModes();
-  });
+if (vcb) vcb.addEventListener('change', function(){ if (vcb.checked) soloCheck(vcb); applyModes(); });
+var gf = document.getElementById('groupFilter');
+if (gf) gf.addEventListener('change', render);
+if (regionFlag){
+  if (rcb) rcb.addEventListener('change', function(){ if (rcb.checked) soloCheck(rcb); applyModes(); });
+  if (ccb){
+    buildCombinedLegend();
+    ccb.addEventListener('change', function(){ if (ccb.checked) soloCheck(ccb); applyModes(); });
+  }
 } else {
-  var rr = document.getElementById('regionRow');
-  if (rr) rr.style.display = 'none';   // no region data (e.g. dinov2-small CLI)
+  var rr = document.getElementById('regionRow'); if (rr) rr.style.display = 'none';
+  var cr = document.getElementById('combinedRow'); if (cr) cr.style.display = 'none';   // combined needs region data
 }
 
 // initial state
