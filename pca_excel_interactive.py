@@ -157,7 +157,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; }
   #wrap { display: flex; gap: 16px; align-items: flex-start; }
-  #plot { flex: 1; height: 720px; }
+  #plotWrap { flex: 1; position: relative; }
+  #plot { width: 100%; height: 720px; }
+  #plotFrame { position: absolute; top: 8px; left: 8px; right: 8px; bottom: 8px;
+               border: 2px dashed #e24b4a; border-radius: 2px; pointer-events: none; display: none; }
   #side { width: 360px; flex: none; }
   #imgWrap { position: relative; width: 340px; border: 1px solid #ccc; }
   #imgWrap img { width: 100%; display: block; }
@@ -188,7 +191,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
    mandrel/layer/housing (dark tone = real, light = synthetic) and draws the
    transitions on the polar image &middot; hover a point to mark its patch.</p>
 <div id="wrap">
-  <div id="plot"></div>
+  <div id="plotWrap"><div id="plot"></div><div id="plotFrame"></div></div>
   <div id="side">
     <div class="sliderRow" id="viewRow">
       <label>Ansicht:</label>
@@ -250,6 +253,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </select>
     </div>
     <div class="hint" id="count"></div>
+    <div class="sliderRow" id="figurePanel" style="border-top:0.5px solid #ddd;margin-top:10px;padding-top:10px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Figur / Export</div>
+      <div id="camSection">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;flex-wrap:wrap">
+          <label style="width:auto;font-size:12px">Azimut&deg;<input id="camAz" type="text" style="width:54px;margin-left:3px"></label>
+          <label style="width:auto;font-size:12px">Elev.&deg;<input id="camEl" type="text" style="width:50px;margin-left:3px"></label>
+          <label style="width:auto;font-size:12px">Dist.<input id="camDist" type="text" style="width:50px;margin-left:3px"></label>
+          <button id="camApply" type="button">Anwenden</button>
+        </div>
+        <div class="hint">aktualisiert sich live beim Drehen</div>
+        <div style="display:flex;gap:6px;margin:6px 0">
+          <input id="camCode" type="text" style="flex:1;font-family:monospace;font-size:11px" placeholder='{"eye":{...}}'>
+          <button id="camCopy" type="button">Kopieren</button>
+          <button id="camCodeApply" type="button">Anwenden</button>
+        </div>
+        <div class="hint">View-Code: kopieren &rarr; in anderem Modell einf&uuml;gen &amp; anwenden</div>
+      </div>
+      <label style="display:block;margin:8px 0 6px;cursor:pointer;font-size:13px"><input type="checkbox" id="showFrame"> Rahmen anzeigen (Zoom-Hilfe, nicht im Export)</label>
+      <button id="exportBtn" type="button">Als SVG exportieren</button>
+      <div class="hint" id="exportHint" style="display:none">Export in der 2D-Ansicht (PC1/PC2)</div>
+    </div>
   </div>
 </div>
 
@@ -366,7 +390,7 @@ function buildTraces(){
     }
     var tr = { mode:'markers', name:names[i], customdata:cds, marker:marker,
                x:xs, y:ys, hovertemplate:(is3d ? HT3 : HT2) };
-    if (is3d){ tr.type='scatter3d'; tr.z=zs; } else { tr.type='scattergl'; }
+    if (is3d){ tr.type='scatter3d'; tr.z=zs; } else { tr.type='scatter'; }
     out.push(tr);
   }
   document.getElementById('count').innerText = shown + ' points shown (stride ' + stride + ')';
@@ -374,7 +398,9 @@ function buildTraces(){
 }
 
 function render(){
-  Plotly.react('plot', buildTraces(), mode === '3d' ? layout3d : layout2d, {responsive:true});
+  var lay = (mode === '3d') ? layout3d : layout2d;
+  lay.showlegend = !(regionsActive() || combinedActive());   // native real/synth legend only where it fits
+  Plotly.react('plot', buildTraces(), lay, {responsive:true});
   drawBounds();
 }
 
@@ -443,7 +469,7 @@ document.getElementById('colStride').addEventListener('change', render);
 // 2D / 3D view toggle
 var vradios = document.querySelectorAll('input[name="viewMode"]');
 for (var vi = 0; vi < vradios.length; vi++){
-  vradios[vi].addEventListener('change', function(e){ mode = e.target.value; render(); });
+  vradios[vi].addEventListener('change', function(e){ mode = e.target.value; render(); updateFigurePanel(); });
 }
 
 var vcb = document.getElementById('showVertical');
@@ -465,6 +491,95 @@ if (regionFlag){
   var rr = document.getElementById('regionRow'); if (rr) rr.style.display = 'none';
   var cr = document.getElementById('combinedRow'); if (cr) cr.style.display = 'none';   // combined needs region data
 }
+
+// ---- figure / export: camera readout, frame, SVG export (2D native, 3D projected) ----
+var MODEL_NAME = "__MODEL__";
+function _v(a){ a=a||{}; return {x:a.x||0, y:a.y||0, z:a.z||0}; }
+// (3D projection vector helpers removed with the 3D SVG export)
+function currentCamera(){
+  var cam = (gd.layout && gd.layout.scene && gd.layout.scene.camera) || {};
+  return { eye:_v(cam.eye||{x:1.25,y:1.25,z:1.25}), up:_v(cam.up||{x:0,y:0,z:1}), center:_v(cam.center||{x:0,y:0,z:0}) };
+}
+function _deg(x){ return x*180/Math.PI; }
+function _rad(x){ return x*Math.PI/180; }
+function camAzElDist(cam){
+  var e=cam.eye, d=Math.sqrt(e.x*e.x+e.y*e.y+e.z*e.z)||1;
+  return { az:_deg(Math.atan2(e.y,e.x)), el:_deg(Math.asin(Math.max(-1,Math.min(1,e.z/d)))), dist:d };
+}
+function azElDistEye(az,el,d){ var a=_rad(az), b=_rad(el); return {x:d*Math.cos(b)*Math.cos(a), y:d*Math.cos(b)*Math.sin(a), z:d*Math.sin(b)}; }
+function updateCamFields(){
+  if (mode !== '3d') return;
+  var cam=currentCamera(), v=camAzElDist(cam);
+  var A=document.getElementById('camAz'), E=document.getElementById('camEl'), D=document.getElementById('camDist'), VC=document.getElementById('camCode');
+  if (A && document.activeElement!==A) A.value=v.az.toFixed(1);
+  if (E && document.activeElement!==E) E.value=v.el.toFixed(1);
+  if (D && document.activeElement!==D) D.value=v.dist.toFixed(2);
+  if (VC && document.activeElement!==VC) VC.value=JSON.stringify({eye:{x:+cam.eye.x.toFixed(4), y:+cam.eye.y.toFixed(4), z:+cam.eye.z.toFixed(4)}});
+}
+function applyAzEl(){
+  var az=parseFloat(document.getElementById('camAz').value), el=parseFloat(document.getElementById('camEl').value), d=parseFloat(document.getElementById('camDist').value);
+  if (isNaN(az)||isNaN(el)||isNaN(d)){ return; }
+  Plotly.relayout(gd, {'scene.camera.eye': azElDistEye(az,el,d)});
+}
+function applyCode(){
+  try{ var c=JSON.parse(document.getElementById('camCode').value); var up={'scene.camera.eye': c.eye||currentCamera().eye}; if(c.up) up['scene.camera.up']=c.up; if(c.center) up['scene.camera.center']=c.center; Plotly.relayout(gd, up); }
+  catch(e){ alert('View-Code ist kein gueltiges JSON.'); }
+}
+function _copyText(t){
+  if (navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(t); }
+  else { var ta=document.createElement('textarea'); ta.value=t; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} document.body.removeChild(ta); }
+}
+function _download(text, filename, mime){
+  var blob=new Blob([text], {type:mime}), url=URL.createObjectURL(blob), a=document.createElement('a');
+  a.href=url; a.download=filename; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+}
+// key colors for the exported figure (Plotly's own legend only knows real/synth).
+function _legendData(){
+  if (regionsActive()) return { title:'dunkler Ton = echt, heller Ton = synthetisch',
+    items:[[REGION_COLORS[1][0],'Mandrel'],[REGION_COLORS[2][0],'Layer'],[REGION_COLORS[3][0],'Zellgehaeuse'],[REGION_COLORS[4][0],'Tab'],[REGION_COLORS[0][0],'Padding']] };
+  if (combinedActive()) return { title:'Farbton = Region, Helligkeit = Tiefe',
+    items:[[REGION_RAMP[1][0],'Mandrel'],[REGION_RAMP[2][0],'Layer'],[REGION_RAMP[3][0],'Zellgehaeuse'],[REGION_RAMP[4][0],'Tab'],[REGION_RAMP[0][0],'Padding']] };
+  return null;   // default: Plotly legend fits; vertical: colorbar already in the figure
+}
+function _injectLegend(svgText){
+  var leg=_legendData(); if(!leg) return svgText;
+  var x=16, y=16, rowH=20, boxW=182, boxH=16+(leg.items.length+1)*rowH;
+  var g='<g font-family="sans-serif">';
+  g+='<rect x="'+x+'" y="'+y+'" width="'+boxW+'" height="'+boxH+'" fill="#ffffff" fill-opacity="0.9" stroke="#cccccc"/>';
+  g+='<text x="'+(x+10)+'" y="'+(y+16)+'" font-size="11" fill="#555555">'+leg.title+'</text>';
+  for (var i=0;i<leg.items.length;i++){
+    var yy=y+16+(i+1)*rowH;
+    g+='<rect x="'+(x+10)+'" y="'+(yy-11)+'" width="12" height="12" fill="'+leg.items[i][0]+'"/>';
+    g+='<text x="'+(x+28)+'" y="'+(yy-1)+'" font-size="12" fill="#222222">'+leg.items[i][1]+'</text>';
+  }
+  g+='</g>';
+  return svgText.replace('</svg>', g+'</svg>');
+}
+function export2dSvg(){
+  Plotly.toImage(gd, {format:'svg'}).then(function(uri){
+    var i=uri.indexOf(','), svg=decodeURIComponent(uri.slice(i+1));
+    _download(_injectLegend(svg), MODEL_NAME + '_PC1_PC2.svg', 'image/svg+xml');
+  });
+}
+// (3D SVG projection export removed on request)
+function updateFigurePanel(){
+  var cs=document.getElementById('camSection'); if (cs) cs.style.display=(mode==='3d')?'block':'none';
+  var eb=document.getElementById('exportBtn'); if (eb) eb.style.display=(mode==='3d')?'none':'inline-block';
+  var eh=document.getElementById('exportHint'); if (eh) eh.style.display=(mode==='3d')?'block':'none';
+  if (mode==='3d') updateCamFields();
+}
+(function(){
+  var b;
+  b=document.getElementById('camApply'); if(b) b.addEventListener('click', applyAzEl);
+  b=document.getElementById('camCodeApply'); if(b) b.addEventListener('click', applyCode);
+  b=document.getElementById('camCopy'); if(b) b.addEventListener('click', function(){ _copyText(document.getElementById('camCode').value); });
+  b=document.getElementById('exportBtn'); if(b) b.addEventListener('click', export2dSvg);
+  var fc=document.getElementById('showFrame'); if(fc) fc.addEventListener('change', function(){ var fr=document.getElementById('plotFrame'); if(fr) fr.style.display=fc.checked?'block':'none'; });
+  gd.on('plotly_relayout', updateCamFields);
+  gd.on('plotly_relayouting', updateCamFields);
+  updateFigurePanel();
+})();
 
 // initial state
 document.getElementById('hoverImg').src = images[0];
@@ -522,6 +637,7 @@ def build_interactive_html(scores, labels, grids, img_b64, evr, path,
             "xaxis": {"title": f"PC1 ({evr[0]*100:.1f}%)"},
             "yaxis": {"title": f"PC2 ({evr[1]*100:.1f}%)"},
             "zaxis": {"title": f"PC3 ({evr[2]*100:.1f}%)"},
+            "camera": {"projection": {"type": "orthographic"}},
         },
         "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
         "legend": {"x": 0, "y": 1},
